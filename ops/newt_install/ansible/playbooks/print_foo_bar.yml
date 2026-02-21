@@ -1,0 +1,15 @@
+---
+- name: Milestone 1 - print foo/bar via op:// env reference
+  hosts: local
+  gather_facts: false
+
+  tasks:
+    - name: Ensure FOO is available from environment
+      assert:
+        that:
+          - lookup('env', 'FOO') | length > 0
+        fail_msg: "FOO is empty. Ensure .env defines FOO=op://... and run via op run."
+
+    - name: Print the fetched value
+      debug:
+        msg: "Value of foo: {{ lookup('env', 'FOO') }}"
