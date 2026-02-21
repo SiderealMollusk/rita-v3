@@ -1,0 +1,71 @@
+---
+- name: Snapshot edge VMs on Proxmox
+  hosts: edge
+  become: true
+  gather_facts: false
+
+  vars:
+    edge_vm_map:
+      newt: 9100
+      monitoring: 9200
+    snapshot_name: ""
+    snapshot_description: ""
+    snapshot_targets_csv: "newt,monitoring"
+    expected_parent_snapshot: ""
+
+  tasks:
+    - name: Normalize snapshot targets from CSV to list
+      set_fact:
+        snapshot_targets: "{{ snapshot_targets_csv.split(',') | map('trim') | reject('equalto', '') | list }}"
+
+    - name: Ensure normalized target list is not empty
+      assert:
+        that:
+          - snapshot_targets | length > 0
+        fail_msg: "No valid snapshot targets provided."
+
+    - name: Validate snapshot name is provided
+      assert:
+        that:
+          - snapshot_name | length > 0
+        fail_msg: "snapshot_name is required (for example: baseline-clean)."
+
+    - name: Validate requested targets are known
+      assert:
+        that:
+          - item in (edge_vm_map.keys() | list)
+        fail_msg: "Unknown snapshot target '{{ item }}'. Valid targets: {{ edge_vm_map.keys() | list }}"
+      loop: "{{ snapshot_targets }}"
+
+    - name: Optionally verify expected parent snapshot exists
+      shell: "qm listsnapshot {{ edge_vm_map[item] }}"
+      args:
+        executable: /bin/bash
+      register: parent_check
+      changed_when: false
+      failed_when: expected_parent_snapshot | length > 0 and (expected_parent_snapshot not in parent_check.stdout)
+      loop: "{{ snapshot_targets }}"
+
+    - name: Ensure snapshot does not already exist
+      shell: "qm listsnapshot {{ edge_vm_map[item] }}"
+      args:
+        executable: /bin/bash
+      register: snapshot_check
+      changed_when: false
+      failed_when: snapshot_name in snapshot_check.stdout
+      loop: "{{ snapshot_targets }}"
+
+    - name: Create snapshot
+      shell: >-
+        qm snapshot {{ edge_vm_map[item] }} {{ snapshot_name }}
+        {% if snapshot_description | length > 0 %}--description {{ snapshot_description | quote }}{% endif %}
+      args:
+        executable: /bin/bash
+      register: snapshot_create
+      changed_when: true
+      loop: "{{ snapshot_targets }}"
+
+    - name: Show snapshot summary
+      debug:
+        msg: "Created snapshot '{{ snapshot_name }}' for {{ item }} (VMID {{ edge_vm_map[item] }})."
+      loop: "{{ snapshot_targets }}"

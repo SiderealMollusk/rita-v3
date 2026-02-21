@@ -1,0 +1,104 @@
+---
+- name: Prepare NUC (Proxmox edge) for Pangolin/Newt
+  hosts: edge
+  become: true
+  gather_facts: true
+
+  vars:
+    # Optional: set to true once you are ready for unattended dist upgrades.
+    do_full_upgrade: false
+    configure_ufw: false
+    docker_engine_package: docker.io
+    docker_compose_plugin_package: docker-compose-plugin
+    docker_compose_legacy_package: docker-compose
+    base_packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - jq
+      - ufw
+      - unzip
+
+  tasks:
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade installed packages (safe mode)
+      apt:
+        upgrade: safe
+      when: do_full_upgrade | bool
+
+    - name: Install base packages
+      apt:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Install Docker engine
+      apt:
+        name: "{{ docker_engine_package }}"
+        state: present
+
+    - name: Install Docker Compose plugin (preferred)
+      block:
+        - name: Install Compose plugin package
+          apt:
+            name: "{{ docker_compose_plugin_package }}"
+            state: present
+      rescue:
+        - name: Install legacy docker-compose package (fallback)
+          apt:
+            name: "{{ docker_compose_legacy_package }}"
+            state: present
+
+    - name: Ensure Docker service is enabled and started
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Enable IPv4 forwarding for edge routing
+      copy:
+        dest: /etc/sysctl.d/99-pangolin-newt.conf
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward=1
+      notify: Apply sysctl
+
+    - name: Configure UFW defaults (optional)
+      command: ufw default deny incoming
+      changed_when: false
+      when: configure_ufw | bool
+
+    - name: Configure UFW outgoing allow (optional)
+      command: ufw default allow outgoing
+      changed_when: false
+      when: configure_ufw | bool
+
+    - name: Allow SSH via UFW (optional)
+      command: ufw allow 22/tcp
+      changed_when: false
+      when: configure_ufw | bool
+
+    - name: Allow HTTPS via UFW for Pangolin edge (optional)
+      command: ufw allow 443/tcp
+      changed_when: false
+      when: configure_ufw | bool
+
+    - name: Enable UFW (optional)
+      command: ufw --force enable
+      changed_when: false
+      when: configure_ufw | bool
+
+    - name: Show next step note
+      debug:
+        msg: >-
+          NUC base prep complete. Next: deploy Pangolin/Newt containers and pass
+          enrollment secrets via 1Password-backed env at runtime.
+
+  handlers:
+    - name: Apply sysctl
+      command: sysctl --system
+      changed_when: true

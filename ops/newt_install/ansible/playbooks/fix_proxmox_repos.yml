@@ -1,0 +1,67 @@
+---
+- name: Switch Proxmox host to no-subscription repositories
+  hosts: edge
+  become: true
+  gather_facts: true
+
+  vars:
+    release: "{{ ansible_facts['distribution_release'] }}"
+    pve_no_subscription_repo: "deb http://download.proxmox.com/debian/pve {{ release }} pve-no-subscription"
+    ceph_no_subscription_repo: "deb http://download.proxmox.com/debian/ceph-squid {{ release }} no-subscription"
+
+  tasks:
+    - name: Disable Proxmox enterprise repository sources (.list and .sources)
+      shell: |
+        set -euo pipefail
+        changed=0
+
+        # Remove enterprise lines from main sources.list if present.
+        if [ -f /etc/apt/sources.list ] && grep -q 'enterprise.proxmox.com' /etc/apt/sources.list; then
+          sed -i.bak '/enterprise\.proxmox\.com/d' /etc/apt/sources.list
+          changed=1
+        fi
+
+        # Disable any dedicated source file that still points to enterprise.proxmox.com.
+        for file in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+          [ -f "$file" ] || continue
+          if grep -q 'enterprise.proxmox.com' "$file"; then
+            mv "$file" "${file}.disabled"
+            changed=1
+          fi
+        done
+
+        if [ "$changed" -eq 1 ]; then
+          echo CHANGED
+        fi
+      args:
+        executable: /bin/bash
+      register: disable_enterprise_sources
+      changed_when: "'CHANGED' in disable_enterprise_sources.stdout"
+
+    - name: Ensure pve-no-subscription repository is present
+      copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.list
+        mode: "0644"
+        content: |
+          {{ pve_no_subscription_repo }}
+
+    - name: Ensure ceph no-subscription repository is present
+      copy:
+        dest: /etc/apt/sources.list.d/ceph-no-subscription.list
+        mode: "0644"
+        content: |
+          {{ ceph_no_subscription_repo }}
+
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+      register: apt_refresh
+      retries: 3
+      delay: 2
+      until: apt_refresh is succeeded
+
+    - name: Show repo mode summary
+      debug:
+        msg:
+          - "Configured pve repo: {{ pve_no_subscription_repo }}"
+          - "Configured ceph repo: {{ ceph_no_subscription_repo }}"

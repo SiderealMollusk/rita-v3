@@ -1,0 +1,99 @@
+---
+- name: Clone and configure edge VMs from Debian template
+  hosts: edge
+  become: true
+  gather_facts: true
+
+  vars:
+    template_vmid: 9000
+    clone_storage: local-lvm
+    ci_user: debian
+    ssh_public_key: "{{ lookup('env', 'PVE_VM_SSH_PUBLIC_KEY') | default('', true) }}"
+    ssh_key_file_on_pve: /root/.ssh/ansible-edge-vm.pub
+    edge_vms:
+      - name: newt
+        vmid: 9100
+        ip_cidr: 192.168.5.181/24
+        gateway: 192.168.5.1
+        cores: 2
+        memory_mb: 3072
+      - name: monitoring
+        vmid: 9200
+        ip_cidr: 192.168.5.182/24
+        gateway: 192.168.5.1
+        cores: 2
+        memory_mb: 4096
+
+  tasks:
+    - name: Ensure template VM exists
+      command: "qm status {{ template_vmid }}"
+      changed_when: false
+
+    - name: Require SSH public key for cloud-init
+      assert:
+        that:
+          - ssh_public_key | length > 0
+        fail_msg: >-
+          Missing PVE_VM_SSH_PUBLIC_KEY. Export your public key contents before running,
+          e.g. export PVE_VM_SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)".
+
+    - name: Write SSH public key on Proxmox host for qm --sshkey
+      copy:
+        dest: "{{ ssh_key_file_on_pve }}"
+        mode: "0600"
+        content: "{{ ssh_public_key }}\n"
+
+    - name: Clone VMs from template if missing
+      shell: |
+        set -euo pipefail
+        if qm status {{ item.vmid }} >/dev/null 2>&1; then
+          exit 0
+        fi
+        qm clone {{ template_vmid }} {{ item.vmid }} --name {{ item.name }} --full true --storage {{ clone_storage }}
+        echo CHANGED
+      args:
+        executable: /bin/bash
+      register: clone_result
+      changed_when: "'CHANGED' in clone_result.stdout"
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Configure VM resources and cloud-init networking
+      command: >-
+        qm set {{ item.vmid }}
+        --cores {{ item.cores }}
+        --memory {{ item.memory_mb }}
+        --ciuser {{ ci_user }}
+        --sshkey {{ ssh_key_file_on_pve }}
+        --ipconfig0 ip={{ item.ip_cidr }},gw={{ item.gateway }}
+        --agent enabled=1
+      changed_when: false
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Ensure VMs are started
+      shell: |
+        set -euo pipefail
+        if qm status {{ item.vmid }} | grep -q 'status: running'; then
+          exit 0
+        fi
+        qm start {{ item.vmid }}
+        echo CHANGED
+      args:
+        executable: /bin/bash
+      register: start_result
+      changed_when: "'CHANGED' in start_result.stdout"
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Show VM outputs
+      debug:
+        msg: >-
+          Provisioned {{ item.name }} (VMID {{ item.vmid }}) at {{ item.ip_cidr }}.
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+

@@ -1,0 +1,68 @@
+---
+- name: Build Debian cloud-init template on Proxmox
+  hosts: edge
+  become: true
+  gather_facts: true
+
+  vars:
+    pve_node: "{{ ansible_facts['hostname'] }}"
+    template_vmid: 9000
+    template_name: debian-12-cloudinit-template
+    template_storage: local-lvm
+    template_memory_mb: 2048
+    template_cores: 2
+    template_disk_size_gb: 16
+    cloud_image_url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+    cloud_image_path: /var/lib/vz/template/iso/debian-12-genericcloud-amd64.qcow2
+
+  tasks:
+    - name: Verify Proxmox qm tooling is available
+      command: qm list
+      changed_when: false
+
+    - name: Download Debian cloud image
+      get_url:
+        url: "{{ cloud_image_url }}"
+        dest: "{{ cloud_image_path }}"
+        mode: "0644"
+
+    - name: Create template VM and convert to template if missing
+      shell: |
+        set -euo pipefail
+
+        if ! qm status {{ template_vmid }} >/dev/null 2>&1; then
+          qm create {{ template_vmid }} \
+            --name {{ template_name }} \
+            --memory {{ template_memory_mb }} \
+            --cores {{ template_cores }} \
+            --net0 virtio,bridge=vmbr0
+        fi
+
+        if ! qm config {{ template_vmid }} | grep -q '^scsi0:'; then
+          qm importdisk {{ template_vmid }} {{ cloud_image_path }} {{ template_storage }}
+          qm set {{ template_vmid }} --scsihw virtio-scsi-pci --scsi0 {{ template_storage }}:vm-{{ template_vmid }}-disk-0
+        fi
+
+        if ! qm config {{ template_vmid }} | grep -q '^ide2:'; then
+          qm set {{ template_vmid }} --ide2 {{ template_storage }}:cloudinit
+        fi
+        qm set {{ template_vmid }} --boot c --bootdisk scsi0
+        qm set {{ template_vmid }} --serial0 socket --vga serial0
+        qm set {{ template_vmid }} --agent enabled=1
+        qm resize {{ template_vmid }} scsi0 {{ template_disk_size_gb }}G >/dev/null 2>&1 || true
+
+        if ! qm config {{ template_vmid }} | grep -q '^template: 1'; then
+          qm template {{ template_vmid }}
+          echo CHANGED
+        fi
+      args:
+        executable: /bin/bash
+      register: template_create
+      changed_when: "'CHANGED' in template_create.stdout"
+
+    - name: Show template summary
+      debug:
+        msg:
+          - "Template VMID: {{ template_vmid }}"
+          - "Template name: {{ template_name }}"
+          - "Node: {{ pve_node }}"
