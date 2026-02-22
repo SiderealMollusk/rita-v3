@@ -72,13 +72,38 @@ Run in order:
 ./scripts/ansible_fix_nuc_repos.sh
 ./scripts/ansible_build_nuc_debian_template.sh
 ./scripts/ansible_clone_nuc_edge_vms.sh
-./scripts/ansible_prepare_edge_vms.sh
+./scripts/ansible_validate_nuc_vms_network.sh
+./scripts/ansible_prepare_nuc_vms.sh
+```
+
+Teardown and rebuild from clean slate:
+
+```bash
+CONFIRM_NUKE_NUC_VMS=YES ./scripts/ansible_teardown_nuc_vms.sh
+./scripts/ansible_clone_nuc_edge_vms.sh
+./scripts/ansible_validate_nuc_vms_network.sh
+./scripts/ansible_prepare_nuc_vms.sh
 ```
 
 Notes:
 - `ansible_clone_nuc_edge_vms.sh` auto-loads `~/.ssh/id_ed25519.pub` (or `id_rsa.pub`) into cloud-init.
-- VM guest inventory scaffold: `ops/newt_install/ansible/inventory/edge_vms.ini`
-- `ansible_prepare_edge_vms.sh` installs/enables `qemu-guest-agent` on both VMs.
+- clone playbook uses network defaults from `ops/newt_install/ansible/inventory/group_vars/nuc_vms.yml`.
+- VM guest inventory scaffold: `ops/newt_install/ansible/inventory/nuc_vms.ini`
+- `ansible_validate_nuc_vms_network.sh` is the network/DNS preflight gate.
+- `ansible_prepare_nuc_vms.sh` installs/enables `qemu-guest-agent` on both VMs.
+- `ansible_prepare_nuc_vms.sh` auto-refreshes SSH host keys for cloned VM IPs (set `SKIP_HOSTKEY_REFRESH=1` to skip).
+
+One-shot converge for newt only (network fix + validation + guest-agent + snapshot-if-missing):
+
+```bash
+./scripts/ansible_converge_newt_baseline.sh
+```
+
+Optional runtime override:
+
+```bash
+NUC_VM_GATEWAY=192.168.5.1 NUC_VM_DNS=192.168.5.1 ./scripts/ansible_converge_newt_baseline.sh
+```
 
 ## Snapshot Automation
 

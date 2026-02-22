@@ -8,21 +8,23 @@
     template_vmid: 9000
     clone_storage: local-lvm
     ci_user: debian
+    ci_nameserver: "{{ lookup('env', 'NUC_VM_DNS') | default(nuc_vm_nameserver, true) }}"
+    ci_gateway: "{{ lookup('env', 'NUC_VM_GATEWAY') | default(nuc_vm_gateway, true) }}"
     ssh_public_key: "{{ lookup('env', 'PVE_VM_SSH_PUBLIC_KEY') | default('', true) }}"
     ssh_key_file_on_pve: /root/.ssh/ansible-edge-vm.pub
     edge_vms:
       - name: newt
-        vmid: 9100
-        ip_cidr: 192.168.5.181/24
-        gateway: 192.168.5.1
-        cores: 2
-        memory_mb: 3072
+        vmid: "{{ nuc_vm_definitions.newt.vmid }}"
+        ip_cidr: "{{ nuc_vm_definitions.newt.ip_cidr }}"
+        gateway: "{{ ci_gateway }}"
+        cores: "{{ nuc_vm_definitions.newt.cores }}"
+        memory_mb: "{{ nuc_vm_definitions.newt.memory_mb }}"
       - name: monitoring
-        vmid: 9200
-        ip_cidr: 192.168.5.182/24
-        gateway: 192.168.5.1
-        cores: 2
-        memory_mb: 4096
+        vmid: "{{ nuc_vm_definitions.monitoring.vmid }}"
+        ip_cidr: "{{ nuc_vm_definitions.monitoring.ip_cidr }}"
+        gateway: "{{ ci_gateway }}"
+        cores: "{{ nuc_vm_definitions.monitoring.cores }}"
+        memory_mb: "{{ nuc_vm_definitions.monitoring.memory_mb }}"
 
   tasks:
     - name: Ensure template VM exists
@@ -65,6 +67,7 @@
         --cores {{ item.cores }}
         --memory {{ item.memory_mb }}
         --ciuser {{ ci_user }}
+        --nameserver {{ ci_nameserver }}
         --sshkey {{ ssh_key_file_on_pve }}
         --ipconfig0 ip={{ item.ip_cidr }},gw={{ item.gateway }}
         --agent enabled=1
@@ -96,4 +99,3 @@
       loop: "{{ edge_vms }}"
       loop_control:
         label: "{{ item.name }}"
-

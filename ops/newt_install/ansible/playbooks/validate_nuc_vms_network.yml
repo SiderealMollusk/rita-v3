@@ -1,0 +1,20 @@
+---
+- name: Validate NUC VM network baseline
+  hosts: nuc_vms
+  become: false
+  gather_facts: true
+
+  tasks:
+    - name: Verify DNS resolution for Debian mirrors
+      shell: |
+        set -euo pipefail
+        getent hosts deb.debian.org >/dev/null
+        getent hosts security.debian.org >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify outbound HTTPS reachability
+      command: curl -fsS --max-time 10 https://deb.debian.org/ >/dev/null
+      changed_when: false
+

@@ -1,0 +1,15 @@
+---
+nuc_vm_gateway: 192.168.4.1
+nuc_vm_dns: 192.168.4.1
+nuc_vm_nameserver: "{{ nuc_vm_dns }}"
+nuc_vm_definitions:
+  newt:
+    vmid: 9100
+    ip_cidr: 192.168.5.181/22
+    cores: 2
+    memory_mb: 3072
+  monitoring:
+    vmid: 9200
+    ip_cidr: 192.168.5.182/22
+    cores: 2
+    memory_mb: 4096

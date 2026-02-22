@@ -1,0 +1,50 @@
+---
+- name: Prepare NUC VMs (newt + monitoring)
+  hosts: nuc_vms
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Probe qemu guest agent package name
+      command: apt-cache show qemu-guest-agent
+      register: qga_pkg_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Probe fallback qemu guest agent package name
+      command: apt-cache show qemu-guest-agent-base
+      register: qga_pkg_fallback_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Select qemu guest agent package
+      set_fact:
+        qga_package_name: >-
+          {{
+            'qemu-guest-agent'
+            if qga_pkg_probe.rc == 0
+            else ('qemu-guest-agent-base' if qga_pkg_fallback_probe.rc == 0 else '')
+          }}
+
+    - name: Fail if no known qemu guest agent package is available
+      fail:
+        msg: >-
+          Could not find qemu guest agent package in apt metadata.
+          Checked: qemu-guest-agent, qemu-guest-agent-base.
+      when: qga_package_name | length == 0
+
+    - name: Install qemu guest agent package
+      apt:
+        name: "{{ qga_package_name }}"
+        state: present
+
+    - name: Enable and start qemu-guest-agent
+      service:
+        name: qemu-guest-agent
+        enabled: true
+        state: started

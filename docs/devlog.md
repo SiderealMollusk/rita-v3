@@ -27,3 +27,20 @@
 - Proxmox template (`9000`) exists and is usable.
 - `newt` (`9100`) and `monitoring` (`9200`) VMs are cloned/running with fixed IP assignments.
 - Documentation now covers run order, assumptions, and snapshot workflow.
+
+## 2026-02-21: Standardized NUC VM Bring-Up Flow
+
+### Changes
+- Split VM flow into explicit stages:
+  - clone/configure cloud-init,
+  - validate network/DNS,
+  - install guest-agent.
+- Added rebuild-safe teardown script for VMIDs `9100` and `9200` with explicit confirmation guard.
+- Removed DNS/source mutation from guest-agent prep playbook to keep role separation clean.
+
+### Result
+- Workflow now matches standard image + cloud-init practice:
+  - network baseline handled at clone-time,
+  - preflight validates before apt-based tasks,
+  - prep playbook focuses only on guest package/service state.
+- Network defaults are now inventory-backed in `inventory/group_vars/nuc_vms.yml` with env overrides optional.

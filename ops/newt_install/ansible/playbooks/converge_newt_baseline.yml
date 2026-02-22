@@ -1,0 +1,120 @@
+---
+- name: Converge newt VM cloud-init network baseline
+  hosts: edge
+  become: true
+  gather_facts: false
+
+  vars:
+    newt_vmid: "{{ lookup('env', 'NEWT_VMID') | default(nuc_vm_definitions.newt.vmid, true) }}"
+    newt_ip_cidr: "{{ lookup('env', 'NEWT_IP_CIDR') | default(nuc_vm_definitions.newt.ip_cidr, true) }}"
+    newt_gateway: "{{ lookup('env', 'NUC_VM_GATEWAY') | default(nuc_vm_gateway, true) | trim }}"
+    newt_nameserver: "{{ lookup('env', 'NUC_VM_DNS') | default(nuc_vm_nameserver, true) | trim }}"
+
+  tasks:
+    - name: Ensure newt VM exists on Proxmox
+      command: "qm status {{ newt_vmid }}"
+      changed_when: false
+
+    - name: Validate required network values
+      assert:
+        that:
+          - newt_gateway | length > 0
+          - newt_nameserver | length > 0
+        fail_msg: "Set NUC_VM_GATEWAY (and optionally NUC_VM_DNS) explicitly before running."
+
+    - name: Apply cloud-init network values for newt
+      command: >-
+        qm set {{ newt_vmid }}
+        --ipconfig0 ip={{ newt_ip_cidr }},gw={{ newt_gateway }}
+        --nameserver {{ newt_nameserver }}
+      changed_when: false
+
+    - name: Show effective cloud-init network values
+      debug:
+        msg:
+          - "newt ip={{ newt_ip_cidr }}"
+          - "newt gw={{ newt_gateway }}"
+          - "newt dns={{ newt_nameserver }}"
+
+    - name: Refresh cloud-init config for newt
+      command: "qm cloudinit update {{ newt_vmid }}"
+      changed_when: false
+
+    - name: Reboot newt to apply cloud-init network update
+      shell: |
+        set -euo pipefail
+        qm reboot {{ newt_vmid }} >/dev/null 2>&1 || qm start {{ newt_vmid }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: Validate newt network and install guest agent
+  hosts: newt_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for SSH after reboot
+      wait_for_connection:
+        timeout: 180
+        delay: 5
+
+    - name: Gather facts after SSH is available
+      setup:
+
+    - name: Verify DNS resolution for Debian mirrors
+      shell: |
+        set -euo pipefail
+        getent hosts deb.debian.org >/dev/null
+        getent hosts security.debian.org >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify outbound HTTPS reachability
+      command: curl -fsS --max-time 10 https://deb.debian.org/
+      changed_when: false
+
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install qemu-guest-agent
+      apt:
+        name: qemu-guest-agent
+        state: present
+
+    - name: Enable and start qemu-guest-agent
+      service:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+
+- name: Snapshot newt if baseline snapshot does not exist
+  hosts: edge
+  become: true
+  gather_facts: false
+
+  vars:
+    newt_vmid: 9100
+    baseline_snapshot_name: "{{ lookup('env', 'NEWT_BASELINE_SNAPSHOT') | default('baseline-clean', true) }}"
+    baseline_snapshot_description: "{{ lookup('env', 'NEWT_BASELINE_DESC') | default('Newt baseline after network+guest-agent converge', true) }}"
+
+  tasks:
+    - name: Check existing snapshots for newt
+      command: "qm listsnapshot {{ newt_vmid }}"
+      register: snapshot_list
+      changed_when: false
+
+    - name: Create baseline snapshot when absent
+      command: >-
+        qm snapshot {{ newt_vmid }} {{ baseline_snapshot_name }}
+        --description {{ baseline_snapshot_description | quote }}
+      when: baseline_snapshot_name not in snapshot_list.stdout
+      changed_when: true
+
+    - name: Report snapshot state
+      debug:
+        msg: >-
+          Snapshot '{{ baseline_snapshot_name }}' {{ 'already existed' if baseline_snapshot_name in snapshot_list.stdout else 'created' }} for VMID {{ newt_vmid }}.
