@@ -15,6 +15,9 @@
       changed_when: false
 
     - name: Verify outbound HTTPS reachability
-      command: curl -fsS --max-time 10 https://deb.debian.org/ >/dev/null
+      shell: |
+        set -euo pipefail
+        curl -fsS --max-time 10 https://deb.debian.org/ >/dev/null
+      args:
+        executable: /bin/bash
       changed_when: false
-

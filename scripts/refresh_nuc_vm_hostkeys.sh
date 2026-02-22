@@ -37,7 +37,7 @@ for host in "${HOSTS[@]}"; do
 done
 
 for host in "${HOSTS[@]}"; do
-  ssh-keyscan -H "${host}" >>"${HOME}/.ssh/known_hosts"
+  ssh-keyscan -H "${host}" >>"${HOME}/.ssh/known_hosts" 2>/dev/null || true
 done
 
 echo "Refreshed SSH host keys for: ${HOSTS[*]}"

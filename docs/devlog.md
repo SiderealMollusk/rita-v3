@@ -44,3 +44,45 @@
   - preflight validates before apt-based tasks,
   - prep playbook focuses only on guest package/service state.
 - Network defaults are now inventory-backed in `inventory/group_vars/nuc_vms.yml` with env overrides optional.
+
+## 2026-02-22: NUC VM Network Baseline Debug + Hardening
+
+### Summary
+- Completed root-cause analysis of repeated VM DNS/apt failures during post-clone baseline prep.
+- Confirmed failures were caused by incorrect network assumptions (`/24` + `192.168.5.1`) versus actual LAN (`/22` with gateway `192.168.4.1`).
+- Hardened Ansible automation to use inventory-backed network defaults and removed brittle host-route auto-detection.
+
+### Detailed Findings
+- Proxmox host network:
+  - `vmbr0`: `192.168.5.173/22`
+  - default gateway: `192.168.4.1`
+- VM `newt` had previously been configured as `192.168.5.181/24` with gateway `192.168.5.1`, causing unreachable gateway and DNS hangs.
+- After correcting to `192.168.5.181/22` + `192.168.4.1`, DNS and apt behavior normalized.
+
+### Automation Changes
+- Added shared inventory vars in `ops/newt_install/ansible/inventory/group_vars/all.yml`:
+  - `nuc_vm_gateway`
+  - `nuc_vm_dns`
+  - `nuc_vm_definitions` (newt/monitoring VMID, IP CIDR, CPU, RAM)
+- Updated clone and converge playbooks to consume inventory vars by default, with env overrides remaining optional.
+- Added/used `scripts/refresh_nuc_vm_hostkeys.sh` to make host key rotation after re-clone routine.
+- Added one-shot `newt` baseline converge path (`converge_newt_baseline`) that:
+  - applies cloud-init network,
+  - reboots and waits,
+  - validates DNS/HTTPS,
+  - installs/enables `qemu-guest-agent`,
+  - snapshots if baseline snapshot does not already exist.
+
+### Verification Outcome
+- `newt` baseline now validates successfully:
+  - SSH reachable
+  - IP/route correct (`192.168.5.181/22`, gw `192.168.4.1`)
+  - DNS resolution works
+  - HTTPS outbound works
+  - `sudo apt-get update` works
+  - `qemu-guest-agent` install/start completed in automation
+- Baseline snapshot (`baseline-clean`) created for VMID `9100`.
+
+### Next
+- Converge and validate `monitoring` baseline with the same network model.
+- Begin Newt app-layer deployment playbook on `newt`.

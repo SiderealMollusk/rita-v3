@@ -76,6 +76,28 @@
       loop_control:
         label: "{{ item.name }}"
 
+    - name: Refresh cloud-init generated config for each VM
+      command: "qm cloudinit update {{ item.vmid }}"
+      changed_when: false
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Reboot running VMs so updated cloud-init network is applied
+      shell: |
+        set -euo pipefail
+        if qm status {{ item.vmid }} | grep -q 'status: running'; then
+          qm reboot {{ item.vmid }} >/dev/null 2>&1 || true
+          echo CHANGED
+        fi
+      args:
+        executable: /bin/bash
+      register: reboot_running_result
+      changed_when: "'CHANGED' in reboot_running_result.stdout"
+      loop: "{{ edge_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: Ensure VMs are started
       shell: |
         set -euo pipefail
