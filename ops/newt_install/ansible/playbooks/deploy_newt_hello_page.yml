@@ -1,0 +1,104 @@
+---
+- name: Deploy minimal hello page on newt VM
+  hosts: newt_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    hello_dir: /opt/newt-hello
+    hello_page_path: /opt/newt-hello/index.html
+    hello_compose_path: /opt/newt-hello/docker-compose.yml
+    hello_port: "{{ lookup('env', 'NEWT_HELLO_PORT') | default('8080', true) | trim }}"
+    hello_image: "{{ lookup('env', 'NEWT_HELLO_IMAGE') | default('nginx:alpine', true) | trim }}"
+
+  tasks:
+    - name: Ensure Docker engine is installed
+      apt:
+        name: docker.io
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure Docker service is enabled and started
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure hello app directory exists
+      file:
+        path: "{{ hello_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write hello page content
+      copy:
+        dest: "{{ hello_page_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>newt hello</title>
+          </head>
+          <body>
+            <h1>newt hello</h1>
+            <p>If you can read this, Pangolin -> Newt -> VM HTTP is working.</p>
+          </body>
+          </html>
+
+    - name: Write docker compose for hello page
+      copy:
+        dest: "{{ hello_compose_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          services:
+            hello:
+              image: {{ hello_image }}
+              container_name: newt-hello
+              restart: unless-stopped
+              ports:
+                - "{{ hello_port }}:80"
+              volumes:
+                - {{ hello_page_path }}:/usr/share/nginx/html/index.html:ro
+
+    - name: Ensure hello page container is up
+      shell: |
+        set -euo pipefail
+        cd "{{ hello_dir }}"
+        if docker compose version >/dev/null 2>&1; then
+          docker compose pull
+          docker compose up -d --remove-orphans
+        elif command -v docker-compose >/dev/null 2>&1; then
+          docker-compose pull
+          docker-compose up -d --remove-orphans
+        else
+          apt-get update
+          apt-get install -y docker-compose
+          docker-compose pull
+          docker-compose up -d --remove-orphans
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Verify local HTTP response
+      shell: |
+        set -euo pipefail
+        curl -fsS "http://127.0.0.1:{{ hello_port }}/" | grep -q "newt hello"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show hello endpoint info
+      debug:
+        msg:
+          - "Hello page is up on {{ inventory_hostname }}."
+          - "LAN URL: http://{{ ansible_host }}:{{ hello_port }}/"

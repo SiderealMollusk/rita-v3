@@ -1,0 +1,658 @@
+---
+- name: Deploy Monitoring Phase 1 stack on monitoring VM
+  hosts: monitoring_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    monitoring_dir: /opt/monitoring
+    monitoring_network: monitoring
+    grafana_image: "{{ lookup('env', 'GRAFANA_IMAGE') | default('grafana/grafana:11.1.0', true) }}"
+    grafana_user: "{{ lookup('env', 'GRAFANA_ADMIN_USER') | default('admin', true) | trim }}"
+    grafana_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') | default('admin', true) | trim }}"
+    monitoring_compose_path: /opt/monitoring/docker-compose.yml
+    prometheus_config_path: /opt/monitoring/prometheus.yml
+    blackbox_config_path: /opt/monitoring/blackbox.yml
+    promtail_config_path: /opt/monitoring/promtail.yml
+    grafana_provisioning_dir: /opt/monitoring/grafana/provisioning
+    grafana_dashboards_dir: /opt/monitoring/grafana/dashboards
+    grafana_datasources_path: /opt/monitoring/grafana/provisioning/datasources/datasources.yml
+    grafana_dashboards_provider_path: /opt/monitoring/grafana/provisioning/dashboards/dashboards.yml
+    grafana_dashboard_path: /opt/monitoring/grafana/dashboards/homelab-overview.json
+    monitoring_pull_images: "{{ (lookup('env', 'MONITORING_PULL_IMAGES') | default('false', true) | lower) in ['1', 'true', 'yes', 'on'] }}"
+
+  tasks:
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure Docker engine is installed
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Ensure Docker service is enabled and started
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Probe Docker Compose plugin availability
+      command: docker compose version
+      register: compose_plugin_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Probe docker-compose binary availability
+      command: docker-compose version
+      register: compose_binary_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Install docker-compose binary when no compose tooling is present
+      apt:
+        name: docker-compose
+        state: present
+      when:
+        - compose_plugin_probe.rc != 0
+        - compose_binary_probe.rc != 0
+
+    - name: Ensure monitoring directory exists
+      file:
+        path: "{{ monitoring_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure Grafana provisioning directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ grafana_provisioning_dir }}"
+        - "{{ grafana_provisioning_dir }}/datasources"
+        - "{{ grafana_provisioning_dir }}/dashboards"
+        - "{{ grafana_dashboards_dir }}"
+
+    - name: Write Prometheus config
+      copy:
+        dest: "{{ prometheus_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: prometheus
+              static_configs:
+                - targets: ['prometheus:9090']
+
+            - job_name: node-exporter
+              static_configs:
+                - targets: ['node-exporter:9100']
+
+            - job_name: cadvisor
+              static_configs:
+                - targets: ['cadvisor:8080']
+
+            - job_name: blackbox-http
+              metrics_path: /probe
+              params:
+                module: [http_2xx]
+              static_configs:
+                - targets:
+                    - https://pangolin.virgil.info
+                    - https://h5.virgil.info
+                    - http://192.168.5.181:8080
+              relabel_configs:
+                - source_labels: [__address__]
+                  target_label: __param_target
+                - source_labels: [__param_target]
+                  target_label: instance
+                - target_label: __address__
+                  replacement: blackbox-exporter:9115
+
+    - name: Write Blackbox exporter config
+      copy:
+        dest: "{{ blackbox_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          modules:
+            http_2xx:
+              prober: http
+              timeout: 10s
+              http:
+                method: GET
+                preferred_ip_protocol: ip4
+                valid_status_codes: []
+
+    - name: Write Promtail config
+      copy:
+        dest: "{{ promtail_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server:
+            http_listen_port: 9080
+            grpc_listen_port: 0
+          positions:
+            filename: /tmp/positions.yaml
+          clients:
+            - url: http://loki:3100/loki/api/v1/push
+          scrape_configs:
+            - job_name: docker
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: docker
+                    __path__: /var/lib/docker/containers/*/*-json.log
+
+    - name: Write Grafana datasources provisioning
+      copy:
+        dest: "{{ grafana_datasources_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              uid: prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: true
+            - name: Loki
+              uid: loki
+              type: loki
+              access: proxy
+              url: http://loki:3100
+              editable: true
+
+    - name: Write Grafana dashboards provisioning
+      copy:
+        dest: "{{ grafana_dashboards_provider_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: 1
+          providers:
+            - name: Homelab
+              orgId: 1
+              folder: Homelab
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 30
+              options:
+                path: /var/lib/grafana/dashboards
+
+    - name: Write Grafana starter dashboard
+      copy:
+        dest: "{{ grafana_dashboard_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {% raw %}
+          {
+            "annotations": {
+              "list": [
+                {
+                  "builtIn": 1,
+                  "datasource": {
+                    "type": "grafana",
+                    "uid": "-- Grafana --"
+                  },
+                  "enable": true,
+                  "hide": true,
+                  "iconColor": "rgba(0, 211, 255, 1)",
+                  "name": "Annotations & Alerts",
+                  "type": "dashboard"
+                }
+              ]
+            },
+            "editable": true,
+            "graphTooltip": 0,
+            "id": null,
+            "panels": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "mappings": [],
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "red",
+                          "value": 0
+                        },
+                        {
+                          "color": "green",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 0,
+                  "y": 0
+                },
+                "id": 1,
+                "options": {
+                  "colorMode": "value",
+                  "graphMode": "none",
+                  "justifyMode": "auto",
+                  "orientation": "auto",
+                  "reduceOptions": {
+                    "calcs": [
+                      "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                  },
+                  "textMode": "auto"
+                },
+                "pluginVersion": "11.1.0",
+                "targets": [
+                  {
+                    "expr": "sum(probe_success{job=\"blackbox-http\"})",
+                    "legendFormat": "",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Blackbox Up Targets",
+                "type": "stat"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "s"
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 12,
+                  "y": 0
+                },
+                "id": 2,
+                "options": {
+                  "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                  },
+                  "tooltip": {
+                    "mode": "single"
+                  }
+                },
+                "targets": [
+                  {
+                    "expr": "probe_duration_seconds{job=\"blackbox-http\"}",
+                    "legendFormat": "{{instance}}",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Probe Duration by Target",
+                "type": "timeseries"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "percentunit"
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 8,
+                  "x": 0,
+                  "y": 8
+                },
+                "id": 3,
+                "options": {
+                  "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                  },
+                  "tooltip": {
+                    "mode": "single"
+                  }
+                },
+                "targets": [
+                  {
+                    "expr": "100 - (avg by(instance) (rate(node_cpu_seconds_total{job=\"node-exporter\",mode=\"idle\"}[5m])) * 100)",
+                    "legendFormat": "{{instance}}",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Node CPU Usage",
+                "type": "timeseries"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "percentunit"
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 8,
+                  "x": 8,
+                  "y": 8
+                },
+                "id": 4,
+                "options": {
+                  "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                  },
+                  "tooltip": {
+                    "mode": "single"
+                  }
+                },
+                "targets": [
+                  {
+                    "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"}))",
+                    "legendFormat": "{{instance}}",
+                    "refId": "A"
+                  }
+                ],
+                "title": "Node Memory Usage",
+                "type": "timeseries"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short"
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 8,
+                  "x": 16,
+                  "y": 8
+                },
+                "id": 5,
+                "options": {
+                  "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                  },
+                  "tooltip": {
+                    "mode": "single"
+                  }
+                },
+                "targets": [
+                  {
+                    "expr": "count(container_last_seen{job=\"cadvisor\"})",
+                    "legendFormat": "containers seen",
+                    "refId": "A"
+                  }
+                ],
+                "title": "cAdvisor Container Count",
+                "type": "timeseries"
+              }
+            ],
+            "schemaVersion": 39,
+            "style": "dark",
+            "tags": [
+              "homelab",
+              "phase1"
+            ],
+            "templating": {
+              "list": []
+            },
+            "time": {
+              "from": "now-30m",
+              "to": "now"
+            },
+            "timepicker": {},
+            "timezone": "",
+            "title": "Homelab Overview",
+            "uid": "homelab-overview",
+            "version": 2,
+            "weekStart": ""
+          }
+          {% endraw %}
+
+    - name: Write monitoring docker compose file
+      copy:
+        dest: "{{ monitoring_compose_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          services:
+            prometheus:
+              image: prom/prometheus:latest
+              container_name: prometheus
+              restart: unless-stopped
+              volumes:
+                - {{ prometheus_config_path }}:/etc/prometheus/prometheus.yml:ro
+                - prometheus-data:/prometheus
+              ports:
+                - "9090:9090"
+              networks:
+                - {{ monitoring_network }}
+
+            grafana:
+              image: {{ grafana_image }}
+              container_name: grafana
+              restart: unless-stopped
+              environment:
+                - GF_SECURITY_ADMIN_USER={{ grafana_user }}
+                - GF_SECURITY_ADMIN_PASSWORD={{ grafana_password }}
+              volumes:
+                - grafana-data:/var/lib/grafana
+                - {{ grafana_provisioning_dir }}:/etc/grafana/provisioning:ro
+                - {{ grafana_dashboards_dir }}:/var/lib/grafana/dashboards:ro
+              ports:
+                - "3000:3000"
+              networks:
+                - {{ monitoring_network }}
+
+            loki:
+              image: grafana/loki:latest
+              container_name: loki
+              restart: unless-stopped
+              command: -config.file=/etc/loki/local-config.yaml
+              volumes:
+                - loki-data:/loki
+              ports:
+                - "3100:3100"
+              networks:
+                - {{ monitoring_network }}
+
+            blackbox-exporter:
+              image: prom/blackbox-exporter:latest
+              container_name: blackbox-exporter
+              restart: unless-stopped
+              command: --config.file=/etc/blackbox_exporter/config.yml
+              volumes:
+                - {{ blackbox_config_path }}:/etc/blackbox_exporter/config.yml:ro
+              ports:
+                - "9115:9115"
+              networks:
+                - {{ monitoring_network }}
+
+            node-exporter:
+              image: prom/node-exporter:latest
+              container_name: node-exporter
+              restart: unless-stopped
+              command:
+                - '--path.rootfs=/host'
+              pid: host
+              volumes:
+                - '/:/host:ro,rslave'
+              ports:
+                - "9100:9100"
+              networks:
+                - {{ monitoring_network }}
+
+            cadvisor:
+              image: gcr.io/cadvisor/cadvisor:latest
+              container_name: cadvisor
+              restart: unless-stopped
+              privileged: true
+              devices:
+                - /dev/kmsg:/dev/kmsg
+              volumes:
+                - /:/rootfs:ro
+                - /var/run:/var/run:rw
+                - /sys:/sys:ro
+                - /var/lib/docker:/var/lib/docker:ro
+              ports:
+                - "8081:8080"
+              networks:
+                - {{ monitoring_network }}
+
+            promtail:
+              image: grafana/promtail:latest
+              container_name: promtail
+              restart: unless-stopped
+              command: -config.file=/etc/promtail/config.yml
+              volumes:
+                - {{ promtail_config_path }}:/etc/promtail/config.yml:ro
+                - /var/lib/docker/containers:/var/lib/docker/containers:ro
+              networks:
+                - {{ monitoring_network }}
+
+            uptime-kuma:
+              image: louislam/uptime-kuma:latest
+              container_name: uptime-kuma
+              restart: unless-stopped
+              volumes:
+                - kuma-data:/app/data
+              ports:
+                - "3001:3001"
+              networks:
+                - {{ monitoring_network }}
+
+          networks:
+            {{ monitoring_network }}:
+              driver: bridge
+
+          volumes:
+            prometheus-data:
+            grafana-data:
+            loki-data:
+            kuma-data:
+
+    - name: Re-check Docker Compose plugin availability
+      command: docker compose version
+      register: compose_plugin_probe_after
+      changed_when: false
+      failed_when: false
+
+    - name: Re-check docker-compose binary availability
+      command: docker-compose version
+      register: compose_binary_probe_after
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if no Docker Compose tooling is available
+      fail:
+        msg: "Neither 'docker compose' plugin nor 'docker-compose' binary is available."
+      when:
+        - compose_plugin_probe_after.rc != 0
+        - compose_binary_probe_after.rc != 0
+
+    - name: Bring up monitoring stack
+      shell: |
+        set -euo pipefail
+        cd "{{ monitoring_dir }}"
+        if docker compose version >/dev/null 2>&1; then
+          if {{ monitoring_pull_images | ternary('true', 'false') }}; then
+            docker compose pull
+          fi
+          docker compose up -d --remove-orphans
+        else
+          if {{ monitoring_pull_images | ternary('true', 'false') }}; then
+            docker-compose pull
+          fi
+          docker-compose up -d --remove-orphans
+        fi
+      args:
+        executable: /bin/bash
+      register: monitoring_compose_up
+      changed_when: >-
+        'Creating' in monitoring_compose_up.stdout
+        or 'Recreating' in monitoring_compose_up.stdout
+        or 'Pulling' in monitoring_compose_up.stdout
+        or 'Started' in monitoring_compose_up.stdout
+
+    - name: Verify expected containers are running
+      shell: |
+        set -euo pipefail
+        for c in prometheus grafana loki blackbox-exporter node-exporter cadvisor promtail uptime-kuma; do
+          docker ps --format '{{ "{{.Names}}" }}' | grep -x "${c}" >/dev/null
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Wait for Grafana TCP port
+      wait_for:
+        host: 127.0.0.1
+        port: 3000
+        timeout: 60
+
+    - name: Verify Grafana health endpoint
+      uri:
+        url: http://127.0.0.1:3000/api/health
+        method: GET
+        status_code: 200
+      register: grafana_health
+      retries: 10
+      delay: 3
+      until: grafana_health.status == 200
+
+    - name: Show monitoring endpoints
+      debug:
+        msg:
+          - "Grafana: http://{{ ansible_host }}:3000 (default admin/admin unless overridden)"
+          - "Prometheus: http://{{ ansible_host }}:9090"
+          - "Uptime Kuma: http://{{ ansible_host }}:3001"
+          - "Blackbox Exporter: http://{{ ansible_host }}:9115"
+          - "Grafana starter dashboard: Dashboards -> Homelab -> Homelab Overview"

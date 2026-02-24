@@ -6,6 +6,12 @@ This repo uses 1Password secret references in local `.env` and resolves them at 
 
 ### 1. Create `.env` (git-ignored)
 
+Start from the committed template:
+
+```bash
+cp .env.example .env
+```
+
 ```dotenv
 OP_VAULT=wsrkpssm6j5cq63t5kni7cfkbm
 FOO=op://wsrkpssm6j5cq63t5kni7cfkbm/foo/bar
@@ -14,6 +20,7 @@ FOO=op://wsrkpssm6j5cq63t5kni7cfkbm/foo/bar
 Notes:
 - Keep only references (`op://...`) in `.env`, not raw secrets.
 - Do not store session tokens in `.env`.
+- Keep non-secrets (for example `GRAFANA_IMAGE`, `MONITORING_PULL_IMAGES`) in `.env.example` and `.env`.
 
 ### 2. Sign in from your system shell
 
@@ -145,3 +152,58 @@ Require expected parent phase before new snapshot:
 ```bash
 ./scripts/ansible_snapshot_edge_vms.sh --name phase-2 --expected-parent baseline-clean
 ```
+
+## Deploy Newt on VM
+
+Add these `op://` references to `.env`:
+
+```dotenv
+NEWT_ENDPOINT=op://<vault>/<item>/endpoint
+NEWT_ID=op://<vault>/<item>/id
+NEWT_SECRET=op://<vault>/<item>/secret
+```
+
+Optional overrides:
+
+```dotenv
+NEWT_IMAGE=fosrl/newt:latest
+NEWT_NETWORK_MODE=host
+NEWT_MOUNT_DOCKER_SOCKET=false
+```
+
+Run deploy:
+
+```bash
+./scripts/ansible_deploy_newt_vm.sh
+```
+
+What it does:
+- resolves `NEWT_*` via `op run --env-file=.env`,
+- writes `/opt/newt/newt-config.secret` on VM (`0600`),
+- writes `/opt/newt/docker-compose.yml`,
+- runs compose `pull` + `up -d`,
+- verifies container `newt` is running.
+
+Related files:
+- Script: `scripts/ansible_deploy_newt_vm.sh`
+- Playbook: `ops/newt_install/ansible/playbooks/deploy_newt_on_vm.yml`
+
+## Deploy Minimal Test Web Page (newt VM)
+
+Deploy a dead-simple HTTP test page on `newt` (default port `8080`):
+
+```bash
+./scripts/ansible_deploy_newt_hello_page.sh
+```
+
+Optional port override:
+
+```bash
+NEWT_HELLO_PORT=18080 ./scripts/ansible_deploy_newt_hello_page.sh
+```
+
+This is meant as the first Pangolin public-resource validation target.
+
+Related files:
+- Script: `scripts/ansible_deploy_newt_hello_page.sh`
+- Playbook: `ops/newt_install/ansible/playbooks/deploy_newt_hello_page.yml`

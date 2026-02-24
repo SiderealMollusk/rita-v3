@@ -1,0 +1,187 @@
+---
+- name: Deploy Newt on VM
+  hosts: newt_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    newt_endpoint: "{{ lookup('env', 'NEWT_ENDPOINT') | default('', true) | trim }}"
+    newt_id: "{{ lookup('env', 'NEWT_ID') | default('', true) | trim }}"
+    newt_secret: "{{ lookup('env', 'NEWT_SECRET') | default('', true) | trim }}"
+    newt_image: "{{ lookup('env', 'NEWT_IMAGE') | default('fosrl/newt:latest', true) | trim }}"
+    newt_compose_dir: /opt/newt
+    newt_config_path: /opt/newt/newt-config.secret
+    newt_compose_path: /opt/newt/docker-compose.yml
+    newt_network_mode: "{{ lookup('env', 'NEWT_NETWORK_MODE') | default('host', true) | trim }}"
+    newt_mount_docker_socket: "{{ lookup('env', 'NEWT_MOUNT_DOCKER_SOCKET') | default('false', true) | bool }}"
+
+  tasks:
+    - name: Validate required Newt secret env vars are present
+      assert:
+        that:
+          - newt_endpoint | length > 0
+          - newt_id | length > 0
+          - newt_secret | length > 0
+        fail_msg: "Missing one or more required env vars: NEWT_ENDPOINT, NEWT_ID, NEWT_SECRET."
+      no_log: true
+
+    - name: Verify outbound reachability to Pangolin endpoint
+      shell: |
+        set -euo pipefail
+        curl -fsS --max-time 10 "{{ newt_endpoint }}" >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Refresh apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure Docker engine is installed
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Ensure Docker service is enabled and started
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Allow VM login user to access Docker without sudo
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Probe Docker Compose plugin availability
+      command: docker compose version
+      register: compose_plugin_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Probe docker-compose binary availability
+      command: docker-compose version
+      register: compose_binary_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Install docker-compose binary when no compose tooling is present
+      apt:
+        name: docker-compose
+        state: present
+      when:
+        - compose_plugin_probe.rc != 0
+        - compose_binary_probe.rc != 0
+
+    - name: Ensure Newt deploy directory exists
+      file:
+        path: "{{ newt_compose_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write Newt config secret JSON
+      copy:
+        dest: "{{ newt_config_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {
+            "id": "{{ newt_id }}",
+            "secret": "{{ newt_secret }}"
+          }
+      no_log: true
+
+    - name: Write Newt docker compose file
+      copy:
+        dest: "{{ newt_compose_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          services:
+            newt:
+              image: {{ newt_image }}
+              container_name: newt
+              restart: unless-stopped
+              network_mode: {{ newt_network_mode }}
+              environment:
+                PANGOLIN_ENDPOINT: {{ newt_endpoint | quote }}
+                CONFIG_FILE: /run/secrets/newt-config
+              cap_add:
+                - NET_ADMIN
+              secrets:
+                - newt-config
+          {% if newt_mount_docker_socket %}
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock
+          {% endif %}
+          secrets:
+            newt-config:
+              file: {{ newt_config_path }}
+
+    - name: Re-check Docker Compose plugin availability
+      command: docker compose version
+      register: compose_plugin_probe_after
+      changed_when: false
+      failed_when: false
+
+    - name: Re-check docker-compose binary availability
+      command: docker-compose version
+      register: compose_binary_probe_after
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if no Docker Compose tooling is available
+      fail:
+        msg: "Neither 'docker compose' plugin nor 'docker-compose' binary is available after package install."
+      when:
+        - compose_plugin_probe_after.rc != 0
+        - compose_binary_probe_after.rc != 0
+
+    - name: Ensure Newt image is pulled and service is up
+      shell: |
+        set -euo pipefail
+        cd "{{ newt_compose_dir }}"
+        if docker compose version >/dev/null 2>&1; then
+          docker compose pull
+          docker compose up -d --remove-orphans
+        elif command -v docker-compose >/dev/null 2>&1; then
+          docker-compose pull
+          docker-compose up -d --remove-orphans
+        else
+          echo "Neither 'docker compose' nor 'docker-compose' is available." >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: compose_up_result
+      changed_when: >-
+        'Creating' in compose_up_result.stdout
+        or 'Recreating' in compose_up_result.stdout
+        or 'Pulling' in compose_up_result.stdout
+        or 'Started' in compose_up_result.stdout
+
+    - name: Verify Newt container is running
+      shell: |
+        set -euo pipefail
+        docker ps --format '{{ "{{.Names}}" }}' | grep -x newt >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show Newt status hint
+      debug:
+        msg:
+          - "Newt container deployed on {{ inventory_hostname }}."
+          - "Check logs: docker logs --tail=200 newt"
+          - "If docker group membership was just changed, open a new SSH session before running docker commands without sudo."
