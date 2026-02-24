@@ -8,12 +8,16 @@
     monitoring_dir: /opt/monitoring
     monitoring_network: monitoring
     grafana_image: "{{ lookup('env', 'GRAFANA_IMAGE') | default('grafana/grafana:11.1.0', true) }}"
+    tempo_image: "{{ lookup('env', 'TEMPO_IMAGE') | default('grafana/tempo:2.5.0', true) }}"
+    otel_collector_image: "{{ lookup('env', 'OTEL_COLLECTOR_IMAGE') | default('otel/opentelemetry-collector:0.104.0', true) }}"
     grafana_user: "{{ lookup('env', 'GRAFANA_ADMIN_USER') | default('admin', true) | trim }}"
     grafana_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') | default('admin', true) | trim }}"
     monitoring_compose_path: /opt/monitoring/docker-compose.yml
     prometheus_config_path: /opt/monitoring/prometheus.yml
     blackbox_config_path: /opt/monitoring/blackbox.yml
     promtail_config_path: /opt/monitoring/promtail.yml
+    tempo_config_path: /opt/monitoring/tempo.yml
+    otel_collector_config_path: /opt/monitoring/otel-collector.yml
     grafana_provisioning_dir: /opt/monitoring/grafana/provisioning
     grafana_dashboards_dir: /opt/monitoring/grafana/dashboards
     grafana_datasources_path: /opt/monitoring/grafana/provisioning/datasources/datasources.yml
@@ -159,6 +163,63 @@
                     job: docker
                     __path__: /var/lib/docker/containers/*/*-json.log
 
+    - name: Write Tempo config
+      copy:
+        dest: "{{ tempo_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          auth_enabled: false
+          server:
+            http_listen_port: 3200
+          distributor:
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                  http:
+          ingester:
+            max_block_duration: 5m
+          compactor:
+            compaction:
+              block_retention: 24h
+          storage:
+            trace:
+              backend: local
+              local:
+                path: /tmp/tempo/blocks
+              wal:
+                path: /tmp/tempo/wal
+
+    - name: Write OpenTelemetry Collector config
+      copy:
+        dest: "{{ otel_collector_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+          processors:
+            batch: {}
+          exporters:
+            otlp/tempo:
+              endpoint: tempo:4317
+              tls:
+                insecure: true
+          service:
+            pipelines:
+              traces:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [otlp/tempo]
+
     - name: Write Grafana datasources provisioning
       copy:
         dest: "{{ grafana_datasources_path }}"
@@ -180,6 +241,12 @@
               type: loki
               access: proxy
               url: http://loki:3100
+              editable: true
+            - name: Tempo
+              uid: tempo
+              type: tempo
+              access: proxy
+              url: http://tempo:3200
               editable: true
 
     - name: Write Grafana dashboards provisioning
@@ -558,6 +625,32 @@
               networks:
                 - {{ monitoring_network }}
 
+            tempo:
+              image: {{ tempo_image }}
+              container_name: tempo
+              restart: unless-stopped
+              user: "0:0"
+              command: [ "-config.file=/etc/tempo/tempo.yml" ]
+              volumes:
+                - {{ tempo_config_path }}:/etc/tempo/tempo.yml:ro
+                - tempo-data:/tmp/tempo
+              ports:
+                - "3200:3200"
+              networks:
+                - {{ monitoring_network }}
+
+            otel-collector:
+              image: {{ otel_collector_image }}
+              container_name: otel-collector
+              restart: unless-stopped
+              command: [ "--config=/etc/otelcol/config.yml" ]
+              volumes:
+                - {{ otel_collector_config_path }}:/etc/otelcol/config.yml:ro
+              ports:
+                - "4318:4318"
+              networks:
+                - {{ monitoring_network }}
+
             uptime-kuma:
               image: louislam/uptime-kuma:latest
               container_name: uptime-kuma
@@ -578,6 +671,7 @@
             grafana-data:
             loki-data:
             kuma-data:
+            tempo-data:
 
     - name: Re-check Docker Compose plugin availability
       command: docker compose version
@@ -625,12 +719,57 @@
     - name: Verify expected containers are running
       shell: |
         set -euo pipefail
-        for c in prometheus grafana loki blackbox-exporter node-exporter cadvisor promtail uptime-kuma; do
+        for c in prometheus grafana loki blackbox-exporter node-exporter cadvisor promtail uptime-kuma tempo otel-collector; do
           docker ps --format '{{ "{{.Names}}" }}' | grep -x "${c}" >/dev/null
         done
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: Verify Tempo health endpoint
+      uri:
+        url: http://127.0.0.1:3200/ready
+        method: GET
+        status_code: 200
+      register: tempo_health
+      retries: 10
+      delay: 3
+      until: tempo_health.status == 200
+
+    - name: Build synthetic trace timestamps (nanoseconds)
+      set_fact:
+        synthetic_trace_start_ns: "{{ (ansible_date_time.epoch | int) * 1000000000 }}"
+        synthetic_trace_end_ns: "{{ ((ansible_date_time.epoch | int) * 1000000000) + 1000000000 }}"
+
+    - name: Emit synthetic trace span to OTEL collector
+      uri:
+        url: http://127.0.0.1:4318/v1/traces
+        method: POST
+        status_code: 200
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          resourceSpans:
+            - resource:
+                attributes:
+                  - key: service.name
+                    value:
+                      stringValue: monitoring-smoketest
+              scopeSpans:
+                - scope:
+                    name: deploy-smoke
+                  spans:
+                    - traceId: 5b8aa5a2d2c872e8321cf37308d69df2
+                      spanId: 051581bf3cb55c13
+                      name: deploy-smoke-span
+                      kind: 1
+                      startTimeUnixNano: "{{ synthetic_trace_start_ns | string }}"
+                      endTimeUnixNano: "{{ synthetic_trace_end_ns | string }}"
+                      attributes:
+                        - key: env
+                          value:
+                            stringValue: homelab
 
     - name: Wait for Grafana TCP port
       wait_for:
@@ -655,4 +794,6 @@
           - "Prometheus: http://{{ ansible_host }}:9090"
           - "Uptime Kuma: http://{{ ansible_host }}:3001"
           - "Blackbox Exporter: http://{{ ansible_host }}:9115"
+          - "Tempo: http://{{ ansible_host }}:3200"
+          - "OTLP HTTP ingest (collector): http://{{ ansible_host }}:4318/v1/traces"
           - "Grafana starter dashboard: Dashboards -> Homelab -> Homelab Overview"

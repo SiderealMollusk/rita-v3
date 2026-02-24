@@ -25,6 +25,8 @@ Options:
 Environment:
   MONITORING_PULL_IMAGES=true    Pull latest container images before compose up
   GRAFANA_IMAGE=<image:tag>      Grafana image tag (default: grafana/grafana:11.1.0)
+  TEMPO_IMAGE=<image:tag>        Tempo image tag (default: grafana/tempo:2.5.0)
+  OTEL_COLLECTOR_IMAGE=<tag>     OTel collector image tag (default: otel/opentelemetry-collector:0.104.0)
   GRAFANA_ADMIN_USER             Grafana admin user (overrides op:// reference)
   GRAFANA_ADMIN_PASSWORD         Grafana admin password (overrides op:// reference)
 EOF
